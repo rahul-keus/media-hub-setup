@@ -1,21 +1,15 @@
 import { $ } from 'zx';
-import { NodeSSH } from 'node-ssh';
 import fs from 'fs';
 import path from 'path';
 
 $.verbose = true;
 
-const ssh = new NodeSSH();
-const MEDIA_HUB_IP = '10.1.4.215';
 const RETRY_LIMIT = 5;
 const RETRY_DELAY_MS = 3000; // 3 seconds delay between retries
 
-async function reconnectIfNeeded() {
-  if (!ssh.isConnected()) {
-    console.log('SSH connection lost. Attempting to reconnect...');
-    await connectToRaspberryPi();
-  }
-}
+// Get script directory - assume script runs from /data/hub-setup/media-hub-setup-main/
+const SCRIPT_DIR = process.cwd();
+const BASE_DIR = '/data';
 
 async function retry(fn, retries = RETRY_LIMIT) {
   let attempts = 0;
@@ -29,55 +23,33 @@ async function retry(fn, retries = RETRY_LIMIT) {
         console.error('Max retry limit reached. Exiting.');
         throw error;
       }
-      // Check if the connection is lost and reconnect
-      await reconnectIfNeeded();  // Check if the connection is still active before retrying
       console.log(`Retrying in ${RETRY_DELAY_MS / 1000} seconds...`);
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
 }
 
-async function connectToRaspberryPi() {
-  return retry(async () => {
-    console.log(`Connecting to Raspberry Pi at ${MEDIA_HUB_IP}...`);
-    await ssh.connect({
-      host: MEDIA_HUB_IP,
-      username: 'root',
-      password: 'keus123',
-    });
-    console.log('Successfully connected to Raspberry Pi');
-  });
-}
-
 async function checkPackageInstalled(packageName) {
   return retry(async () => {
-    const result = await ssh.execCommand(`npm list -g --depth=0 | grep ${packageName}`);
+    const result = await $`npm list -g --depth=0 | grep ${packageName}`.nothrow();
     return result.stdout.includes(packageName);
   });
 }
 
-async function checkFileExists(remotePath) {
+async function checkFileExists(filePath) {
   return retry(async () => {
-    const result = await ssh.execCommand(`test -f ${remotePath} && echo "File exists"`);
+    const result = await $`test -f ${filePath} && echo "File exists"`.nothrow();
     return result.stdout.includes("File exists");
-  });
-}
-
-async function uploadFile(localPath, remotePath) {
-  return retry(async () => {
-    console.log(`Uploading file from ${localPath} to ${remotePath}...`);
-    if (!fs.existsSync(localPath)) {
-      throw new Error(`Local file does not exist: ${localPath}`);
-    }
-    await $`scp ${localPath} root@${MEDIA_HUB_IP}:${remotePath}`;
-    console.log('File uploaded successfully');
   });
 }
 
 async function execCommandWithRetries(command, cwd = null) {
   return retry(async () => {
-    const result = await ssh.execCommand(command, { cwd });
-    if (result.stderr) {
+    const result = cwd
+      ? await $`cd ${cwd} && ${command}`.nothrow()
+      : await $`${command}`.nothrow();
+
+    if (result.stderr && result.exitCode !== 0) {
       throw new Error(result.stderr);
     }
     return result.stdout;
@@ -108,9 +80,10 @@ async function buildPodmanRemoteApi() {
 async function createNetworkIfNotExists(networkName) {
   try {
     // Check if network already exists
-    const existingNetworks = await ssh.execCommand('podman network ls --format "{{.Name}}"');
+    const result = await $`podman network ls --format "{{.Name}}"`.nothrow();
+    const networks = result.stdout.split('\n').filter(n => n.trim());
 
-    if (existingNetworks.stdout.split('\n').includes(networkName)) {
+    if (networks.includes(networkName)) {
       console.log(`Network "${networkName}" already exists.`);
     } else {
       // If the network doesn't exist, create it
@@ -123,18 +96,18 @@ async function createNetworkIfNotExists(networkName) {
   }
 }
 
-
-
 (async () => {
   try {
-    await connectToRaspberryPi();
-    await $`ssh root@${MEDIA_HUB_IP} ls`
+    console.log('Starting hub setup...');
+    console.log(`Script directory: ${SCRIPT_DIR}`);
 
     // Check if npm is installed
-    if (!await checkPackageInstalled('npm')) {
+    const npmCheck = await $`npm --version`.nothrow();
+    if (npmCheck.exitCode !== 0) {
       console.error('NPM is not installed. Exiting.');
       return;
     }
+    console.log(`NPM version: ${npmCheck.stdout.trim()}`);
 
     // Install packages if not already installed
     if (!await checkPackageInstalled('pm2')) {
@@ -155,63 +128,84 @@ async function createNetworkIfNotExists(networkName) {
     await execCommandWithRetries('mkdir -p /data/keus-iot-platform/logs');
     await execCommandWithRetries('mkdir -p /data/keus-iot-platform/plugins');
 
-    // Check and upload files
-    const nodeManagerTarPath = './node-manager-1.0.0.tar.gz';
-    const podmanApiPath = './index-linux-arm64';
+    // Check for files in script directory or current directory
+    // Files should be downloaded from GitHub to the script directory
+    const nodeManagerTarPath = path.join(SCRIPT_DIR, 'node-manager-1.0.0.tar.gz');
+    const podmanApiPath = path.join(SCRIPT_DIR, 'index-linux-arm64');
+    const ecosystemConfigPath = path.join(SCRIPT_DIR, 'ecosystem.config.js');
 
-    console.log('Node Manager tarball found locally. Proceeding with upload...');
-    await uploadFile(nodeManagerTarPath, '/data/keus-iot-platform/node-manager-1.0.0.tar.gz');
+    // Check if files exist locally, if not, they should be in the repo
+    let nodeManagerSource = nodeManagerTarPath;
+    let podmanApiSource = podmanApiPath;
+    let ecosystemConfigSource = ecosystemConfigPath;
 
-    console.log('Podman API binary found locally. Proceeding with upload...');
-    await uploadFile(podmanApiPath, '/data/podman-remote-api');
-    await execCommandWithRetries('mv /data/podman-remote-api /usr/bin/podman-remote-api');
+    // If files don't exist in script dir, check current directory
+    if (!fs.existsSync(nodeManagerTarPath)) {
+      nodeManagerSource = './node-manager-1.0.0.tar.gz';
+    }
+    if (!fs.existsSync(podmanApiPath)) {
+      podmanApiSource = './index-linux-arm64';
+    }
+    if (!fs.existsSync(ecosystemConfigPath)) {
+      ecosystemConfigSource = './ecosystem.config.js';
+    }
+
+    // Copy files to target locations
+    if (fs.existsSync(nodeManagerSource)) {
+      console.log('Node Manager tarball found. Copying...');
+      await $`cp ${nodeManagerSource} /data/keus-iot-platform/node-manager-1.0.0.tar.gz`;
+    } else {
+      console.log('Warning: Node Manager tarball not found. Skipping...');
+    }
+
+    if (fs.existsSync(podmanApiSource)) {
+      console.log('Podman API binary found. Copying...');
+      await $`cp ${podmanApiSource} /usr/bin/podman-remote-api`;
+      await execCommandWithRetries('chmod +x /usr/bin/podman-remote-api');
+    } else {
+      console.log('Warning: Podman API binary not found. Skipping...');
+    }
 
     const tarFilePath = '/data/keus-iot-platform/node-manager-1.0.0.tar.gz';
-    if (!await checkFileExists(tarFilePath)) {
-      throw new Error(`Tar file does not exist on the remote server: ${tarFilePath}`);
+    if (fs.existsSync(tarFilePath) || await checkFileExists(tarFilePath)) {
+      // Extract Node Manager
+      console.log('Extracting Node Manager...');
+      await execCommandWithRetries('tar -xvzf node-manager-1.0.0.tar.gz', '/data/keus-iot-platform');
+    } else {
+      console.log('Warning: Node Manager tar file not found. Skipping extraction...');
     }
-
-    // Extract Node Manager
-    await execCommandWithRetries('tar -xvzf node-manager-1.0.0.tar.gz', '/data/keus-iot-platform');
-
-    // Set permissions
-    await execCommandWithRetries('chmod +x /usr/bin/podman-remote-api');
 
     // Check if Podman is installed
-    const podmanCheck = await execCommandWithRetries('podman --version');
-    if (!podmanCheck.includes('podman')) {
+    const podmanCheck = await $`podman --version`.nothrow();
+    if (podmanCheck.exitCode !== 0 || !podmanCheck.stdout.includes('podman')) {
       throw new Error('Podman is not installed. Please install Podman before proceeding.');
     }
+    console.log(`Podman version: ${podmanCheck.stdout.trim()}`);
 
     // Create Podman network
     await createNetworkIfNotExists('kiotp-network');
 
-    // Modify storage configuration
-    // await execCommandWithRetries(`
-    //   echo "Modifying graphroot in /etc/containers/storage.conf...";
-    //   NEW_GRAPHROOT="/data/containers/storage";
-    //   STORAGE_CONF="/etc/containers/storage.conf";
-    //   sed -i "s|^graphroot =.*|graphroot = \\"$NEW_GRAPHROOT\\"|g" "$STORAGE_CONF";
-    //   mkdir -p "$NEW_GRAPHROOT";
-    //   chown -R root:root "$NEW_GRAPHROOT";
-    //   chmod -R 755 "$NEW_GRAPHROOT";
-    //   systemctl restart podman
-    // `);
-
     // PM2 setup
+    console.log('Setting up PM2...');
     await execCommandWithRetries('pm2 startup');
     await execCommandWithRetries('systemctl enable pm2-root');
     await execCommandWithRetries('pm2 save --force');
     await execCommandWithRetries('pm2 install pm2-logrotate');
 
-    // Upload PM2 config and start
-    await uploadFile('./ecosystem.config.js', '/data/ecosystem.config.js');
-    await execCommandWithRetries('pm2 start ecosystem.config.js', '/data');
-    await execCommandWithRetries('pm2 save --force');
+    // Copy PM2 config and start
+    if (fs.existsSync(ecosystemConfigSource)) {
+      console.log('Copying PM2 config...');
+      await $`cp ${ecosystemConfigSource} /data/ecosystem.config.js`;
+      await execCommandWithRetries('pm2 start ecosystem.config.js', '/data');
+      await execCommandWithRetries('pm2 save --force');
+    } else {
+      console.log('Warning: ecosystem.config.js not found. Skipping PM2 start...');
+    }
+
+    console.log('Hub setup completed successfully!');
 
   } catch (error) {
     console.error('Error:', error);
-  } finally {
-    ssh.dispose();
+    process.exit(1);
   }
 })();
