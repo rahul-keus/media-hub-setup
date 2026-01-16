@@ -45,9 +45,15 @@ async function checkFileExists(filePath) {
 
 async function execCommandWithRetries(command, cwd = null) {
   return retry(async () => {
-    const result = cwd
-      ? await $`cd ${cwd} && ${command}`.nothrow()
-      : await $`${command}`.nothrow();
+    // Use sh -c for shell commands to properly handle pipes, redirects, etc.
+    // This ensures the command is executed as a shell command, not as a single argument
+    let result;
+    if (cwd) {
+      const fullCommand = `cd ${cwd} && ${command}`;
+      result = await $`sh -c ${fullCommand}`.nothrow();
+    } else {
+      result = await $`sh -c ${command}`.nothrow();
+    }
 
     if (result.stderr && result.exitCode !== 0) {
       throw new Error(result.stderr);
