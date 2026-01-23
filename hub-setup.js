@@ -4,6 +4,11 @@ import path from 'path';
 
 $.verbose = true;
 
+// Progress logging function for mobile app to track setup progress
+function logProgress(percentage, message) {
+  console.log(`PROGRESS:${percentage}:${message}`);
+}
+
 const RETRY_LIMIT = 5;
 const RETRY_DELAY_MS = 3000; // 3 seconds delay between retries
 
@@ -106,6 +111,7 @@ async function createNetworkIfNotExists(networkName) {
   try {
     console.log('Starting hub setup...');
     console.log(`Script directory: ${SCRIPT_DIR}`);
+    logProgress(5, 'Starting hub setup');
 
     // Check if npm is installed
     const npmCheck = await $`npm --version`.nothrow();
@@ -118,19 +124,24 @@ async function createNetworkIfNotExists(networkName) {
     // Install packages if not already installed
     if (!await checkPackageInstalled('pm2')) {
       console.log('Installing PM2...');
+      logProgress(15, 'Installing PM2');
       await execCommandWithRetries('npm i -g pm2');
     } else {
       console.log('PM2 is already installed.');
+      logProgress(15, 'PM2 already installed');
     }
 
     if (!await checkPackageInstalled('zx')) {
       console.log('Installing ZX...');
+      logProgress(20, 'Installing ZX');
       await execCommandWithRetries('npm i -g zx');
     } else {
       console.log('ZX is already installed.');
+      logProgress(20, 'ZX already installed');
     }
 
     // Create necessary directories
+    logProgress(25, 'Creating directories');
     await execCommandWithRetries('mkdir -p /data/keus-iot-platform/logs');
     await execCommandWithRetries('mkdir -p /data/keus-iot-platform/plugins');
 
@@ -159,29 +170,36 @@ async function createNetworkIfNotExists(networkName) {
     // Copy files to target locations
     if (fs.existsSync(nodeManagerSource)) {
       console.log('Node Manager tarball found. Copying...');
+      logProgress(30, 'Copying Node Manager');
       await $`cp ${nodeManagerSource} /data/keus-iot-platform/node-manager-1.0.0.tar.gz`;
     } else {
       console.log('Warning: Node Manager tarball not found. Skipping...');
+      logProgress(30, 'Node Manager not found, skipping');
     }
 
     if (fs.existsSync(podmanApiSource)) {
       console.log('Podman API binary found. Copying...');
+      logProgress(35, 'Copying Podman API binary');
       await $`cp ${podmanApiSource} /usr/bin/podman-remote-api`;
       await execCommandWithRetries('chmod +x /usr/bin/podman-remote-api');
     } else {
       console.log('Warning: Podman API binary not found. Skipping...');
+      logProgress(35, 'Podman API binary not found, skipping');
     }
 
     const tarFilePath = '/data/keus-iot-platform/node-manager-1.0.0.tar.gz';
     if (fs.existsSync(tarFilePath) || await checkFileExists(tarFilePath)) {
       // Extract Node Manager
       console.log('Extracting Node Manager...');
+      logProgress(45, 'Extracting Node Manager');
       await execCommandWithRetries('tar -xvzf node-manager-1.0.0.tar.gz', '/data/keus-iot-platform');
     } else {
       console.log('Warning: Node Manager tar file not found. Skipping extraction...');
+      logProgress(45, 'Node Manager tar file not found, skipping');
     }
 
     // Check if Podman is installed
+    logProgress(50, 'Checking Podman installation');
     const podmanCheck = await $`podman --version`.nothrow();
     if (podmanCheck.exitCode !== 0 || !podmanCheck.stdout.includes('podman')) {
       throw new Error('Podman is not installed. Please install Podman before proceeding.');
@@ -189,10 +207,12 @@ async function createNetworkIfNotExists(networkName) {
     console.log(`Podman version: ${podmanCheck.stdout.trim()}`);
 
     // Create Podman network
+    logProgress(60, 'Creating Podman network');
     await createNetworkIfNotExists('kiotp-network');
 
     // PM2 setup
     console.log('Setting up PM2...');
+    logProgress(75, 'Setting up PM2 services');
     await execCommandWithRetries('pm2 startup');
     await execCommandWithRetries('systemctl enable pm2-root');
     await execCommandWithRetries('pm2 save --force');
@@ -201,16 +221,20 @@ async function createNetworkIfNotExists(networkName) {
     // Copy PM2 config and start
     if (fs.existsSync(ecosystemConfigSource)) {
       console.log('Copying PM2 config...');
+      logProgress(90, 'Starting PM2 processes');
       await $`cp ${ecosystemConfigSource} /data/ecosystem.config.js`;
       await execCommandWithRetries('pm2 start ecosystem.config.js', '/data');
       await execCommandWithRetries('pm2 save --force');
     } else {
       console.log('Warning: ecosystem.config.js not found. Skipping PM2 start...');
+      logProgress(90, 'Ecosystem config not found, skipping PM2 start');
     }
 
+    logProgress(100, 'Hub setup completed');
     console.log('Hub setup completed successfully!');
 
   } catch (error) {
+    console.log(`PROGRESS:ERROR:${error.message}`);
     console.error('Error:', error);
     process.exit(1);
   }
