@@ -128,8 +128,8 @@ start_services() {
   fi
 
   cd "$BASE_DIR"
-  retry pm2 start ecosystem.config.js
-  retry pm2 save --force
+  retry PM2_HOME=/data/pm2 pm2 start ecosystem.config.js
+  retry PM2_HOME=/data/pm2 pm2 save --force
   echo "PM2 services started."
 }
 
